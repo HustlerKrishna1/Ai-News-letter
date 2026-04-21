@@ -9,7 +9,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from config import settings
 
@@ -41,6 +41,15 @@ SOURCE_QUALITY: Dict[str, float] = {
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# Tracking params we strip during URL canonicalization. Dropping these means
+# two links to the same article with different utm_* tails collapse to one.
+_TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "gclid", "fbclid", "mc_cid", "mc_eid",
+    "ref", "ref_src", "ref_url", "source", "share", "__twitter_impression",
+    "cmpid", "CMP", "ns_source", "ns_mchannel", "ns_campaign",
+}
+
 
 def _tokens(text: str) -> List[str]:
     return _WORD_RE.findall(text.lower())
@@ -48,6 +57,36 @@ def _tokens(text: str) -> List[str]:
 
 def _normalize_title(title: str) -> str:
     return " ".join(_tokens(title))
+
+
+def canonical_url(url: str) -> str:
+    """Normalize a URL so cross-source duplicates collapse.
+
+    - Lowercase scheme + host, strip leading 'www.'
+    - Drop fragment
+    - Remove tracking query params
+    - Drop trailing slash on path
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    query = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+             if k.lower() not in _TRACKING_PARAMS]
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse((
+        (parsed.scheme or "https").lower(),
+        host,
+        path,
+        parsed.params,
+        urlencode(query, doseq=True),
+        "",
+    ))
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -58,23 +97,61 @@ def _jaccard(a: str, b: str) -> float:
 
 
 def deduplicate(articles: List[Dict]) -> List[Dict]:
-    """Drop exact-URL dupes and near-duplicate titles (Jaccard >= 0.75)."""
-    seen_urls: set[str] = set()
+    """Drop canonical-URL dupes and near-duplicate titles (Jaccard >= 0.75).
+
+    When collapsing duplicates across sources we prefer the article whose
+    source domain appears in the quality table, so Reuters wins over a
+    link-aggregator that happens to point at the same story.
+    """
     kept: List[Dict] = []
+    canonical_index: Dict[str, int] = {}
+
     for art in articles:
-        url = art.get("url", "").split("#", 1)[0]
-        if url in seen_urls:
+        canon = canonical_url(art.get("url", ""))
+        if not canon:
             continue
         norm = _normalize_title(art.get("title", ""))
         if not norm:
             continue
-        is_dupe = any(_jaccard(norm, _normalize_title(k["title"])) >= 0.75 for k in kept)
-        if is_dupe:
+
+        if canon in canonical_index:
+            existing_idx = canonical_index[canon]
+            if _prefer(art, kept[existing_idx]):
+                kept[existing_idx] = art
             continue
-        seen_urls.add(url)
+
+        dup_idx = _title_dup_index(norm, kept)
+        if dup_idx is not None:
+            if _prefer(art, kept[dup_idx]):
+                kept[dup_idx] = art
+                canonical_index[canon] = dup_idx
+            continue
+
+        canonical_index[canon] = len(kept)
         kept.append(art)
+
     log.info("Deduplication: %d -> %d", len(articles), len(kept))
     return kept
+
+
+def _title_dup_index(norm_title: str, kept: List[Dict]) -> int | None:
+    for i, k in enumerate(kept):
+        if _jaccard(norm_title, _normalize_title(k["title"])) >= 0.75:
+            return i
+    return None
+
+
+def _prefer(candidate: Dict, incumbent: Dict) -> bool:
+    """Return True if candidate should replace incumbent as canonical."""
+    return _domain_rank(candidate.get("url", "")) > _domain_rank(incumbent.get("url", ""))
+
+
+def _domain_rank(url: str) -> float:
+    host = urlparse(url).netloc.lower().lstrip("www.")
+    for domain, boost in SOURCE_QUALITY.items():
+        if domain in host:
+            return boost
+    return 0.0
 
 
 def _recency_bonus(published_at: str) -> float:

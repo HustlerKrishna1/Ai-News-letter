@@ -12,7 +12,6 @@ from typing import List
 
 from dotenv import load_dotenv
 
-# Load .env from project root (if present). Safe to call even if file is missing.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
@@ -31,6 +30,7 @@ def _get_list(name: str, default: List[str]) -> List[str]:
 
 
 # Default RSS feeds covering AI, economy, capitalism, geopolitics.
+# Note: HN is handled by the dedicated fetcher now, not listed here.
 DEFAULT_RSS_FEEDS: List[str] = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://www.wired.com/feed/tag/ai/latest/rss",
@@ -40,7 +40,11 @@ DEFAULT_RSS_FEEDS: List[str] = [
     "https://www.ft.com/technology?format=rss",
     "https://www.economist.com/finance-and-economics/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/Economy.xml",
-    "https://hnrss.org/frontpage",
+]
+
+DEFAULT_REDDIT_SUBS: List[str] = [
+    "technology", "artificial", "singularity", "MachineLearning",
+    "worldnews", "Economics", "stocks", "geopolitics",
 ]
 
 
@@ -51,7 +55,10 @@ class Settings:
     data_dir: Path = Path(__file__).resolve().parent / "data"
     output_dir: Path = Path(__file__).resolve().parent / "output"
 
-    # Ingestion
+    # Ingestion — RSS
+    rss_feeds: List[str] = field(default_factory=lambda: _get_list("RSS_FEEDS", DEFAULT_RSS_FEEDS))
+
+    # Ingestion — NewsAPI
     newsapi_key: str = os.getenv("NEWSAPI_KEY", "")
     newsapi_query: str = os.getenv(
         "NEWSAPI_QUERY",
@@ -59,7 +66,19 @@ class Settings:
     )
     newsapi_language: str = os.getenv("NEWSAPI_LANGUAGE", "en")
     newsapi_page_size: int = int(os.getenv("NEWSAPI_PAGE_SIZE", "40"))
-    rss_feeds: List[str] = field(default_factory=lambda: _get_list("RSS_FEEDS", DEFAULT_RSS_FEEDS))
+
+    # Ingestion — Hacker News
+    hn_enabled: bool = _get_bool("HN_ENABLED", True)
+    hn_top_count: int = int(os.getenv("HN_TOP_COUNT", "30"))
+    hn_min_score: int = int(os.getenv("HN_MIN_SCORE", "50"))
+
+    # Ingestion — Reddit
+    reddit_enabled: bool = _get_bool("REDDIT_ENABLED", True)
+    reddit_subs: List[str] = field(default_factory=lambda: _get_list("REDDIT_SUBS", DEFAULT_REDDIT_SUBS))
+    reddit_min_score: int = int(os.getenv("REDDIT_MIN_SCORE", "100"))
+    reddit_per_sub: int = int(os.getenv("REDDIT_PER_SUB", "10"))
+
+    # Ingestion — general
     max_articles_per_source: int = int(os.getenv("MAX_ARTICLES_PER_SOURCE", "15"))
     max_total_articles: int = int(os.getenv("MAX_TOTAL_ARTICLES", "40"))
     http_timeout: int = int(os.getenv("HTTP_TIMEOUT", "15"))
@@ -75,9 +94,24 @@ class Settings:
     # Output
     emit_html: bool = _get_bool("EMIT_HTML", True)
 
+    # Email delivery: "smtp" | "sendgrid" | ""
+    email_provider: str = os.getenv("EMAIL_PROVIDER", "").lower()
+    email_from: str = os.getenv("EMAIL_FROM", "")
+    email_to: List[str] = field(default_factory=lambda: _get_list("EMAIL_TO", []))
+    email_subject_prefix: str = os.getenv("EMAIL_SUBJECT_PREFIX", "Signal Brief")
+    smtp_host: str = os.getenv("SMTP_HOST", "")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user: str = os.getenv("SMTP_USER", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_use_tls: bool = _get_bool("SMTP_USE_TLS", True)
+    sendgrid_api_key: str = os.getenv("SENDGRID_API_KEY", "")
+
+    # Web UI
+    webui_host: str = os.getenv("WEBUI_HOST", "127.0.0.1")
+    webui_port: int = int(os.getenv("WEBUI_PORT", "8000"))
+
 
 settings = Settings()
 
-# Ensure runtime directories exist.
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 settings.output_dir.mkdir(parents=True, exist_ok=True)

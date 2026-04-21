@@ -13,6 +13,7 @@ env/
 data/*.json
 output/*.md
 output/*.html
+output/cron.log
 !data/.gitkeep
 !output/.gitkeep
 
