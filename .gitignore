@@ -1,5 +1,6 @@
 # Secrets
 .env
+.env.local
 
 # Python
 __pycache__/
@@ -8,11 +9,19 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
 
 # Generated output (runtime artifacts)
 data/*.json
+data/archive.sqlite3
+data/archive.sqlite3-*
 output/*.md
 output/*.html
+output/*.xml
+output/cron.log
 !data/.gitkeep
 !output/.gitkeep
 
