@@ -208,9 +208,38 @@ def rank(articles: List[Dict], limit: int | None = None) -> List[Dict]:
     return ranked
 
 
+def _drop_already_featured(articles: List[Dict]) -> List[Dict]:
+    """Drop articles that were featured in a recent issue.
+
+    Import the archive lazily so `process()` stays usable in tests and
+    environments where the archive isn't initialized.
+    """
+    if not settings.cross_run_dedup:
+        return articles
+    try:
+        from modules import archive  # local import to avoid circularity at import time
+
+        archive.init()
+        canons = [canonical_url(a.get("url", "")) for a in articles]
+        recent = archive.already_featured(canons, within_days=settings.cross_run_dedup_days)
+    except Exception as exc:  # noqa: BLE001 - archive must not break pipeline
+        log.warning("Cross-run dedup skipped (archive error): %s", exc)
+        return articles
+    if not recent:
+        return articles
+    filtered = [a for a in articles
+                if canonical_url(a.get("url", "")) not in recent]
+    dropped = len(articles) - len(filtered)
+    if dropped:
+        log.info("Cross-run dedup dropped %d previously-featured article(s) "
+                 "(window: %d days)", dropped, settings.cross_run_dedup_days)
+    return filtered
+
+
 def process(articles: List[Dict]) -> List[Dict]:
-    """Full processing pipeline: dedupe -> rank -> cap."""
+    """Full processing pipeline: dedupe -> cross-run dedup -> rank -> cap."""
     deduped = deduplicate(articles)
-    ranked = rank(deduped, limit=settings.max_total_articles)
+    fresh = _drop_already_featured(deduped)
+    ranked = rank(fresh, limit=settings.max_total_articles)
     log.info("Processed down to %d ranked articles.", len(ranked))
     return ranked

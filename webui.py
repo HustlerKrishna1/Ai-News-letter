@@ -1,117 +1,148 @@
 """FastAPI dashboard for the newsletter.
 
 Endpoints:
-  GET  /                       dashboard listing past issues
+  GET  /                       Jinja2 dashboard: stats, trending, past issues, search
+  GET  /search?q=term          Archive search UI
   GET  /issue/{date}           rendered HTML for a past issue
   GET  /issue/{date}/markdown  raw markdown for a past issue
+  GET  /issues.json            past issues as JSON (from archive)
+  GET  /ranked/{date}          cached ranked articles for a run
   GET  /config                 current topic/source configuration
-  POST /generate               trigger a fresh pipeline run
+  GET  /rss.xml                RSS 2.0 feed
+  GET  /health                 liveness probe (for container healthchecks)
+  POST /generate               trigger a fresh pipeline run (background task)
 
 Run:
     uvicorn webui:app --host 127.0.0.1 --port 8000
+    # or
+    python main.py --serve
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from config import settings
-from main import run as run_pipeline
+from modules import archive
+from modules.delivery import update_rss_feed
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Newsletter AI", version="2.0")
+app = FastAPI(title="Newsletter AI", version="3.0")
 
-_ISSUE_RE = re.compile(r"newsletter_(\d{4}-\d{2}-\d{2})\.md$")
+_TEMPLATE_DIR = settings.project_root / "templates"
+_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
 _run_lock = asyncio.Lock()
 
 
-def _list_issues() -> List[Dict]:
+@app.on_event("startup")
+async def _on_startup() -> None:
+    archive.init()
+
+
+def _render(template_name: str, **context) -> str:
+    return _env.get_template(template_name).render(**context)
+
+
+def _settings_view() -> Dict:
+    return {
+        "llm_provider": settings.llm_provider,
+        "email_provider": settings.email_provider or None,
+        "delivery_channels": ", ".join(settings.delivery_channels),
+        "hn_enabled": settings.hn_enabled,
+        "reddit_enabled": settings.reddit_enabled,
+        "arxiv_enabled": settings.arxiv_enabled,
+        "github_trending_enabled": settings.github_trending_enabled,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(q: Optional[str] = None) -> HTMLResponse:
+    try:
+        stats = archive.stats()
+        trending = archive.trending_topics(days=7, top_n=10)
+        issues = archive.list_issues(limit=100)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Archive query failed: %s", exc)
+        stats = {"issues_count": 0, "articles_seen": 0,
+                 "articles_featured": 0, "avg_quality": None}
+        trending = []
+        issues = _list_issues_from_disk()
+
+    # Fallback: if the archive has no issues recorded yet but there are
+    # Markdown files on disk, surface them so the dashboard isn't empty.
+    if not issues:
+        issues = _list_issues_from_disk()
+
+    return HTMLResponse(_render(
+        "dashboard.html.j2",
+        cfg=_settings_view(),
+        stats=stats,
+        trending=trending,
+        issues=issues,
+        q=q,
+    ))
+
+
+@app.get("/search", response_class=HTMLResponse)
+async def search(q: str = "") -> HTMLResponse:
+    results = archive.search_articles(q, limit=100) if q.strip() else []
+    return HTMLResponse(_render("search.html.j2", q=q, results=results))
+
+
+def _list_issues_from_disk() -> List[Dict]:
+    """Fallback when the archive has no rows yet: scan the output dir."""
     issues: List[Dict] = []
     for path in sorted(settings.output_dir.glob("newsletter_*.md"), reverse=True):
-        match = _ISSUE_RE.search(path.name)
-        if not match:
+        try:
+            date_str = path.stem.split("_", 1)[1]
+        except IndexError:
             continue
-        date_str = match.group(1)
-        html = path.with_suffix(".html")
         issues.append({
-            "date": date_str,
-            "markdown": path.name,
-            "html": html.name if html.exists() else None,
-            "size_kb": round(path.stat().st_size / 1024, 1),
-            "mtime": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+            "issue_date": date_str,
+            "subject": None,
+            "markdown_path": str(path),
+            "html_path": str(path.with_suffix(".html")) if path.with_suffix(".html").exists() else None,
+            "article_count": None,
+            "cluster_count": None,
+            "llm_provider": None,
+            "quality_score": None,
         })
     return issues
 
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard() -> str:
-    issues = _list_issues()
-    rows = "\n".join(
-        f"<tr><td>{i['date']}</td>"
-        f"<td><a href='/issue/{i['date']}'>view</a></td>"
-        f"<td><a href='/issue/{i['date']}/markdown'>md</a></td>"
-        f"<td>{i['size_kb']} KB</td>"
-        f"<td>{i['mtime']}</td></tr>"
-        for i in issues
-    ) or "<tr><td colspan=5><em>No issues yet. Run /generate.</em></td></tr>"
-
-    email_status = settings.email_provider or "disabled"
-    return f"""<!DOCTYPE html>
-<html><head><meta charset=utf-8><title>Newsletter AI — Dashboard</title>
-<style>
-body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:880px;margin:2rem auto;padding:0 1rem;color:#1a1a1a}}
-h1{{border-bottom:2px solid #333;padding-bottom:.3rem}}
-table{{border-collapse:collapse;width:100%;margin-top:1rem}}
-th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}
-th{{background:#f5f5f5}}
-.pill{{display:inline-block;padding:.1rem .5rem;border-radius:999px;background:#eef;color:#224;font-size:.8rem;margin-right:.3rem}}
-form{{margin-top:1rem}}
-button{{padding:.5rem 1rem;font-size:1rem;cursor:pointer}}
-a{{color:#0366d6}}
-.cfg{{margin-top:2rem;font-size:.9rem;color:#555}}
-.cfg code{{background:#f0f0f0;padding:.1rem .3rem;border-radius:3px}}
-</style></head><body>
-<h1>Newsletter AI Dashboard</h1>
-<p>
-  <span class=pill>LLM: {settings.llm_provider}</span>
-  <span class=pill>email: {email_status}</span>
-  <span class=pill>HN: {"on" if settings.hn_enabled else "off"}</span>
-  <span class=pill>Reddit: {"on" if settings.reddit_enabled else "off"}</span>
-</p>
-<form method=post action=/generate onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Running…';">
-  <button type=submit>Generate new issue now</button>
-</form>
-<h2>Past issues</h2>
-<table>
-<thead><tr><th>Date</th><th>HTML</th><th>Markdown</th><th>Size</th><th>Modified</th></tr></thead>
-<tbody>{rows}</tbody></table>
-<div class=cfg>
-<p><a href=/config>/config</a> · <a href=/issues.json>/issues.json</a></p>
-</div>
-</body></html>
-"""
-
-
 @app.get("/issues.json")
 async def issues_json() -> JSONResponse:
-    return JSONResponse(_list_issues())
+    issues = archive.list_issues(limit=200)
+    if not issues:
+        issues = _list_issues_from_disk()
+    return JSONResponse(issues)
 
 
 @app.get("/issue/{date}", response_class=HTMLResponse)
-async def issue_html(date: str) -> str:
+async def issue_html(date: str) -> HTMLResponse:
     html_path = settings.output_dir / f"newsletter_{date}.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail=f"No HTML issue for {date}")
-    return html_path.read_text(encoding="utf-8")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
 @app.get("/issue/{date}/markdown", response_class=PlainTextResponse)
@@ -128,15 +159,65 @@ async def config_view() -> JSONResponse:
         "llm_provider": settings.llm_provider,
         "email_provider": settings.email_provider or None,
         "email_to": settings.email_to,
-        "rss_feeds": settings.rss_feeds,
+        "delivery_channels": settings.delivery_channels,
+        "rss_feeds_count": len(settings.rss_feeds),
         "hn_enabled": settings.hn_enabled,
         "reddit_enabled": settings.reddit_enabled,
-        "reddit_subs": settings.reddit_subs,
+        "arxiv_enabled": settings.arxiv_enabled,
+        "github_trending_enabled": settings.github_trending_enabled,
+        "enrich_enabled": settings.enrich_enabled,
+        "critique_enabled": settings.critique_enabled,
+        "cross_run_dedup": settings.cross_run_dedup,
         "max_total_articles": settings.max_total_articles,
     })
 
 
+@app.get("/rss.xml")
+async def rss_feed() -> Response:
+    feed_path = settings.output_dir / "rss.xml"
+    # Rebuild on the fly so new issues appear without waiting for the next run.
+    try:
+        issues = archive.list_issues(limit=50) or _list_issues_from_disk()
+        update_rss_feed(issues, feed_path=feed_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not rebuild RSS: %s", exc)
+
+    if not feed_path.exists():
+        raise HTTPException(status_code=404, detail="RSS feed not generated yet")
+    return Response(
+        content=feed_path.read_bytes(),
+        media_type="application/rss+xml",
+    )
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    """Liveness probe. Returns 200 + a few basic numbers."""
+    try:
+        stats = archive.stats()
+        ok = True
+    except Exception:  # noqa: BLE001 - this endpoint must never throw
+        stats = {}
+        ok = False
+    return JSONResponse({
+        "ok": ok,
+        "issues": stats.get("issues_count", 0),
+        "articles": stats.get("articles_seen", 0),
+        "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "version": app.version,
+    })
+
+
+@app.get("/ranked/{date}")
+async def ranked_json(date: str) -> JSONResponse:
+    path = settings.data_dir / f"ranked_{date}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No ranked data for {date}")
+    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
 def _run_sync() -> int:
+    from main import run as run_pipeline  # lazy import to avoid cycles
     try:
         return run_pipeline(dry_run=False, verbose=False)
     except Exception:
@@ -158,11 +239,3 @@ async def generate(background: BackgroundTasks) -> JSONResponse:
 
     background.add_task(_locked_run)
     return JSONResponse({"ok": True, "message": "pipeline started in background"})
-
-
-@app.get("/ranked/{date}")
-async def ranked_json(date: str) -> JSONResponse:
-    path = settings.data_dir / f"ranked_{date}.json"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"No ranked data for {date}")
-    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))

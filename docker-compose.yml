@@ -1,0 +1,33 @@
+services:
+  newsletter-web:
+    build: .
+    image: newsletter-ai:latest
+    container_name: newsletter-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    command: ["python", "main.py", "--serve", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3); sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # One-shot job: generate today's issue, email it, and exit.
+  # Run with: docker compose run --rm newsletter-job
+  newsletter-job:
+    build: .
+    image: newsletter-ai:latest
+    profiles: ["job"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    command: ["python", "main.py", "--deliver", "email"]

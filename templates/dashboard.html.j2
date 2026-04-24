@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Newsletter AI — Dashboard</title>
+<style>
+  :root{--accent:#0366d6;--border:#e4e6ea;--bg:#fafafa;--fg:#1a1a1a;--muted:#666}
+  body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1040px;
+       margin:0 auto;padding:2rem 1rem;color:var(--fg);background:var(--bg)}
+  h1{margin:0 0 .2rem;border-bottom:2px solid #222;padding-bottom:.3rem}
+  h2{margin-top:2rem;color:#222}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+        gap:.8rem;margin-top:1rem}
+  .stat{background:#fff;border:1px solid var(--border);border-radius:8px;
+        padding:.9rem 1rem}
+  .stat .n{font-size:1.6rem;font-weight:600;color:#111}
+  .stat .l{font-size:.75rem;color:var(--muted);text-transform:uppercase;
+           letter-spacing:.05em}
+  table{border-collapse:collapse;width:100%;margin-top:1rem;background:#fff;
+        border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  th,td{text-align:left;padding:.55rem .8rem;border-bottom:1px solid var(--border);
+        font-size:.92rem}
+  th{background:#f6f7f9;font-weight:600;color:#333}
+  tr:last-child td{border-bottom:none}
+  .pill{display:inline-block;padding:.1rem .55rem;border-radius:999px;
+        background:#eef2f7;color:#224;font-size:.75rem;margin-right:.25rem}
+  .pill.on{background:#e6f2eb;color:#1a6b3c}
+  .pill.off{background:#fdecec;color:#a33}
+  form.run{margin:1rem 0}
+  button{padding:.55rem 1.1rem;font-size:.95rem;cursor:pointer;
+         background:var(--accent);color:#fff;border:none;border-radius:6px}
+  button:hover{filter:brightness(1.1)}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+  input[type=text]{padding:.45rem .6rem;font-size:.95rem;border:1px solid var(--border);
+                   border-radius:6px;width:100%;max-width:380px}
+  .muted{color:var(--muted);font-size:.85rem}
+  .trend{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.6rem}
+  .trend .pill{background:#fff2de;color:#8a5a00}
+  code{background:#f0f0f0;padding:.05rem .35rem;border-radius:3px;font-size:.85rem}
+</style></head><body>
+
+<h1>Newsletter AI — Dashboard</h1>
+<p>
+  <span class="pill">LLM: {{ cfg.llm_provider }}</span>
+  <span class="pill {{ 'on' if cfg.hn_enabled else 'off' }}">HN: {{ "on" if cfg.hn_enabled else "off" }}</span>
+  <span class="pill {{ 'on' if cfg.reddit_enabled else 'off' }}">Reddit: {{ "on" if cfg.reddit_enabled else "off" }}</span>
+  <span class="pill {{ 'on' if cfg.arxiv_enabled else 'off' }}">arXiv: {{ "on" if cfg.arxiv_enabled else "off" }}</span>
+  <span class="pill {{ 'on' if cfg.github_trending_enabled else 'off' }}">GitHub: {{ "on" if cfg.github_trending_enabled else "off" }}</span>
+  <span class="pill">email: {{ cfg.email_provider or "off" }}</span>
+  <span class="pill">channels: {{ cfg.delivery_channels or "file-only" }}</span>
+</p>
+
+<div class="grid">
+  <div class="stat"><div class="n">{{ stats.issues_count or 0 }}</div><div class="l">issues shipped</div></div>
+  <div class="stat"><div class="n">{{ stats.articles_seen or 0 }}</div><div class="l">articles archived</div></div>
+  <div class="stat"><div class="n">{{ stats.articles_featured or 0 }}</div><div class="l">articles featured</div></div>
+  <div class="stat"><div class="n">{{ stats.avg_quality or "–" }}</div><div class="l">avg quality /10</div></div>
+</div>
+
+{% if trending %}
+<h2>Trending (last 7 days)</h2>
+<div class="trend">
+  {% for t in trending %}<span class="pill">{{ t.topic }} · {{ t.mentions }}</span>{% endfor %}
+</div>
+{% endif %}
+
+<form class="run" method="post" action="/generate" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Running…';">
+  <button type="submit">Generate new issue now</button>
+  <span class="muted">Runs the full pipeline in the background.</span>
+</form>
+
+<h2>Search archive</h2>
+<form method="get" action="/search">
+  <input type="text" name="q" placeholder="Search past articles by title / summary…" value="{{ q or '' }}" />
+  <button type="submit">Search</button>
+</form>
+
+<h2>Past issues</h2>
+<table>
+  <thead><tr><th>Date</th><th>Subject</th><th>Articles</th><th>Quality</th><th>Provider</th><th>View</th></tr></thead>
+  <tbody>
+  {% for i in issues %}
+    <tr>
+      <td>{{ i.issue_date }}</td>
+      <td>{{ i.subject or "—" }}</td>
+      <td>{{ i.article_count or "–" }}</td>
+      <td>{{ "%.1f"|format(i.quality_score) if i.quality_score else "–" }}</td>
+      <td><code>{{ i.llm_provider or "–" }}</code></td>
+      <td><a href="/issue/{{ i.issue_date }}">html</a> · <a href="/issue/{{ i.issue_date }}/markdown">md</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6"><em>No issues yet. Hit "Generate new issue now" to create one.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top:2rem">
+  Config: <a href="/config">/config</a> · Issues JSON: <a href="/issues.json">/issues.json</a>
+  · RSS: <a href="/rss.xml">/rss.xml</a>
+</p>
+
+</body></html>

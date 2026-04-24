@@ -5,6 +5,12 @@ Fetches news articles from multiple sources:
   * RSS feeds — always available; works without any API keys.
   * Hacker News (Firebase API) — top stories above a score threshold.
   * Reddit (public JSON) — top posts from configured subreddits.
+  * arXiv (cs.AI/cs.LG/cs.CL) — fresh research papers via Atom API.
+  * GitHub Trending — today's most-starred repositories.
+
+Transient HTTP failures (5xx, 429, timeouts, connection resets) are
+retried with exponential backoff via @with_retry. Persistent 4xx errors
+fail fast so configuration bugs surface immediately.
 
 Returns a list of normalized article dicts:
     {
@@ -28,10 +34,12 @@ from urllib.parse import urlparse
 import requests
 
 from config import settings
+from modules.retry import with_retry
+from modules.sources_extra import fetch_arxiv, fetch_github_trending
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "newsletter-ai/2.0 (+https://github.com/HustlerKrishna1/Ai-News-letter)"
+USER_AGENT = "newsletter-ai/3.0 (+https://github.com/HustlerKrishna1/Ai-News-letter)"
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -72,6 +80,17 @@ def _host(url: str) -> str:
         return "unknown"
 
 
+@with_retry(attempts=3, base_delay=0.5)
+def _http_get(url: str, params: Dict | None = None) -> requests.Response:
+    resp = requests.get(
+        url, params=params,
+        timeout=settings.http_timeout,
+        headers={"User-Agent": USER_AGENT},
+    )
+    resp.raise_for_status()
+    return resp
+
+
 def fetch_newsapi() -> List[Dict]:
     """Fetch top headlines from NewsAPI. Returns [] if no key configured."""
     if not settings.newsapi_key:
@@ -87,9 +106,7 @@ def fetch_newsapi() -> List[Dict]:
         "apiKey": settings.newsapi_key,
     }
     try:
-        resp = requests.get(url, params=params, timeout=settings.http_timeout,
-                            headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
+        resp = _http_get(url, params=params)
     except requests.RequestException as exc:
         log.warning("NewsAPI request failed: %s", exc)
         return []
@@ -165,9 +182,7 @@ def fetch_rss(feeds: Iterable[str] | None = None) -> List[Dict]:
     results: List[Dict] = []
     for feed in feeds:
         try:
-            resp = requests.get(feed, timeout=settings.http_timeout,
-                                headers={"User-Agent": USER_AGENT})
-            resp.raise_for_status()
+            resp = _http_get(feed)
         except requests.RequestException as exc:
             log.warning("Feed %s failed: %s", feed, exc)
             continue
@@ -184,10 +199,8 @@ def fetch_hackernews() -> List[Dict]:
     if not settings.hn_enabled:
         return []
     try:
-        top_ids = requests.get(
+        top_ids = _http_get(
             "https://hacker-news.firebaseio.com/v0/topstories.json",
-            timeout=settings.http_timeout,
-            headers={"User-Agent": USER_AGENT},
         ).json()[: settings.hn_top_count]
     except (requests.RequestException, ValueError) as exc:
         log.warning("HN topstories fetch failed: %s", exc)
@@ -196,10 +209,8 @@ def fetch_hackernews() -> List[Dict]:
     articles: List[Dict] = []
     for sid in top_ids:
         try:
-            item = requests.get(
-                f"https://hacker-news.firebaseio.com/v0/item/{sid}.json",
-                timeout=settings.http_timeout,
-                headers={"User-Agent": USER_AGENT},
+            item = _http_get(
+                f"https://hacker-news.firebaseio.com/v0/item/{sid}.json"
             ).json()
         except (requests.RequestException, ValueError):
             continue
@@ -231,13 +242,7 @@ def fetch_reddit() -> List[Dict]:
     for sub in settings.reddit_subs:
         url = f"https://www.reddit.com/r/{sub}/top.json"
         try:
-            resp = requests.get(
-                url,
-                params={"t": "day", "limit": settings.reddit_per_sub},
-                timeout=settings.http_timeout,
-                headers={"User-Agent": USER_AGENT},
-            )
-            resp.raise_for_status()
+            resp = _http_get(url, params={"t": "day", "limit": settings.reddit_per_sub})
             payload = resp.json()
         except (requests.RequestException, ValueError) as exc:
             log.warning("Reddit /r/%s failed: %s", sub, exc)
@@ -268,13 +273,28 @@ def fetch_reddit() -> List[Dict]:
 
 
 def fetch_all() -> List[Dict]:
-    """Fetch from every configured source and concatenate."""
-    collected = (
-        fetch_newsapi()
-        + fetch_rss()
-        + fetch_hackernews()
-        + fetch_reddit()
-    )
+    """Fetch from every configured source and concatenate.
+
+    Each source is isolated: a failure in one does not abort the others.
+    Sources are intentionally diverse (mainstream + frontier + community)
+    so the final signal isn't dominated by one editorial lens.
+    """
+    collected: List[Dict] = []
+    for name, fn in (
+        ("newsapi", fetch_newsapi),
+        ("rss", fetch_rss),
+        ("hackernews", fetch_hackernews),
+        ("reddit", fetch_reddit),
+        ("arxiv", fetch_arxiv),
+        ("github-trending", fetch_github_trending),
+    ):
+        try:
+            items = fn()
+            collected.extend(items)
+        except Exception as exc:  # noqa: BLE001 - per-source isolation
+            log.exception("Source %s raised unexpectedly: %s", name, exc)
+
     cleaned = [a for a in collected if a.get("title") and a.get("url")]
-    log.info("Total raw articles fetched: %d", len(cleaned))
+    log.info("Total raw articles fetched: %d (from %d sources)",
+             len(cleaned), 6)
     return cleaned

@@ -1,91 +1,121 @@
-# AI Newsletter Generator
+# AI Newsletter Generator (v3)
 
-A production-ready, AI-powered newsletter generator focused on **AI, economy,
-capitalism, and global power shifts**. Fetches live news from RSS, NewsAPI,
-Hacker News, and Reddit; deduplicates across sources; ranks for signal; and
-generates a structured brief via a pluggable LLM backend (Anthropic, OpenAI, or
-an offline mock).
+A **production-grade**, agent-style AI newsletter generator focused on **AI,
+economy, capitalism, and global power shifts**. Ingests six source types,
+deduplicates across runs, clusters by theme, writes sections in parallel with
+an LLM, critiques its own draft, and delivers to file / email / Slack /
+Discord / Telegram / RSS.
 
-**Runs with zero API keys** by default — `LLM_PROVIDER=mock` produces a real,
-structured newsletter so you can verify the entire pipeline before wiring up
+**Runs with zero API keys** — `LLM_PROVIDER=mock` produces a fully-structured
+newsletter end-to-end so you can validate the entire pipeline before wiring up
 paid APIs.
 
 ---
 
-## Quick Start (60 seconds, no API keys required)
+## What's new in v3
+
+- **Multi-stage editorial pipeline** (`modules/editorial.py`) —
+  triage → cluster → per-cluster section (parallel) → editor → subject line →
+  self-critique judge (with regenerate-if-below-threshold).
+- **Topic clustering** (`modules/cluster.py`) — TF-IDF + cosine similarity,
+  pure-Python / stdlib, no numpy or scikit-learn. Auto-labels clusters as
+  "AI Infrastructure", "Markets & Economy", "Geopolitics", etc.
+- **Full-text enrichment** (`modules/enrich.py`) — stdlib-only HTML
+  readability extractor fetches the top-N article bodies so sections cite
+  real details instead of just summaries. Parallelized.
+- **SQLite archive** (`modules/archive.py`) — cross-run memory: skips
+  articles already featured in the last 14 days, tracks trending topics,
+  persists every issue's quality score + LLM provider + timing.
+- **Two new sources** (`modules/sources_extra.py`) — arXiv (cs.AI / cs.LG /
+  cs.CL) and GitHub Trending, on top of the v2 RSS + NewsAPI + HN + Reddit.
+- **Retry with backoff** (`modules/retry.py`) — exponential backoff + jitter
+  for 5xx / 429 / timeouts / connection resets; 4xx fails fast.
+- **Multi-channel delivery** (`modules/delivery.py`) — one flag sends to any
+  of email, Slack, Discord, Telegram. Independent errors per channel.
+- **RSS 2.0 feed** — `output/rss.xml` + `/rss.xml` endpoint, regenerated on
+  every run and on demand.
+- **Jinja2 templates** — email / dashboard / search all moved to
+  `templates/*.html.j2` with autoescape. No more HTML-in-Python strings.
+- **Structured JSON logs** (`LOG_FORMAT=json`) — one JSON object per line,
+  ready for Datadog / Loki / ELK / Grafana.
+- **Quality telemetry** — every issue stores a faithfulness / clarity /
+  specificity / restraint score in the archive, surfaced in the dashboard.
+- **Docker + docker-compose** — non-root container (`uid 10001`), healthcheck,
+  one-shot `newsletter-job` profile, builds on `python:3.12-slim` + tini.
+- **CI/CD** — GitHub Actions matrix (Python 3.11 + 3.12) with pytest and
+  docker-build jobs, plus a scheduled daily workflow that runs the pipeline.
+- **Test suite** — pytest covers process/cluster/archive/editorial/retry/enrich
+  with a `tmp_path`-isolated filesystem fixture.
+
+v2 features (multi-source, email, web UI, scheduling) are all still here and
+fully integrated with the v3 stack.
+
+---
+
+## Quick Start (60 seconds, no API keys)
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/HustlerKrishna1/Ai-News-letter.git
 cd Ai-News-letter
 
-# 2. Create a virtualenv and install deps
 python -m venv .venv
-
 # macOS / Linux:
 source .venv/bin/activate
 # Windows PowerShell:
 .venv\Scripts\Activate.ps1
-# Windows CMD:
-.venv\Scripts\activate.bat
 
 pip install -r requirements.txt
 
-# 3. Copy the environment template
 cp .env.example .env            # macOS / Linux
 copy .env.example .env          # Windows
 
-# 4. Run it
 python main.py
 ```
 
-You should see output like:
+Output:
 
 ```
-OK - Newsletter written: output/newsletter_2026-04-21.md
-OK - HTML version:       output/newsletter_2026-04-21.html
+OK - Newsletter written: output/newsletter_2026-04-23.md
+OK - HTML version:       output/newsletter_2026-04-23.html
+OK - Quality score:      7.5/10
 ```
 
-Open the generated `.md` or `.html` file in `output/` to see your newsletter.
+Then start the dashboard:
+
+```bash
+python main.py --serve
+# or: uvicorn webui:app --port 8000
+```
+
+Visit `http://127.0.0.1:8000` for the dashboard, search, issue history,
+stats, trending topics, and `/rss.xml`.
 
 ---
 
-## What's in v2
+## CLI
 
-- **Four ingestion sources**: RSS feeds, NewsAPI, Hacker News (Firebase API),
-  Reddit (public JSON). HN and Reddit are **on by default** and need no keys.
-- **Cross-source deduplication**: canonical URL normalization strips tracking
-  params and collapses duplicate stories across sources; the highest-quality
-  source wins.
-- **Email delivery**: ship the issue via SMTP (Gmail, Fastmail, self-hosted) or
-  SendGrid with a single `--email` flag.
-- **Web UI dashboard**: FastAPI app at `http://127.0.0.1:8000` listing past
-  issues, viewing generated HTML, inspecting config, and triggering fresh runs.
-- **Scheduling**: one-shot installers for Windows Task Scheduler
-  (`scripts/schedule_windows.ps1`) and cron (`scripts/schedule_cron.sh`).
+```bash
+python main.py                              # full pipeline -> file output
+python main.py --dry-run                    # fetch + rank only, print top 10
+python main.py --limit 20                   # cap processed articles
+python main.py --deliver email              # email + file
+python main.py --deliver slack,telegram     # multi-channel
+python main.py --email-to you@example.com   # override recipient(s)
+python main.py --no-enrich                  # skip full-text fetch (faster)
+python main.py --no-critique                # skip LLM-as-judge stage
+python main.py --serve                      # start the dashboard
+python main.py -v                           # verbose / debug logging
+```
 
----
-
-## Features
-
-- **Four ingestion sources**: 8 built-in RSS feeds (TechCrunch, Wired, Ars
-  Technica, FT, Economist, NYT, Reuters), Hacker News top stories, 8
-  subreddits, plus optional NewsAPI.
-- **Signal processing**: canonical URL + Jaccard-similarity dedupe,
-  keyword-weighted scoring, source-quality boost, recency decay.
-- **Swappable LLM**: Anthropic, OpenAI, or a deterministic `mock` backend that
-  works fully offline.
-- **Dual output**: Markdown (always) + self-contained HTML (optional).
-- **Email delivery**: SMTP or SendGrid, HTML + plain-text multipart.
-- **Web dashboard**: FastAPI UI for browsing, inspecting, and triggering runs.
-- **Modular architecture** — each pipeline stage lives in its own module.
-- **Graceful failures**: one dead feed or missing SDK never breaks the run.
+Cached ranked articles → `data/ranked_<YYYY-MM-DD>.json`.
+Newsletters → `output/newsletter_<YYYY-MM-DD>.{md,html}`.
+Archive DB → `data/archive.sqlite3` (WAL mode, safe for concurrent reads).
 
 ---
 
-## Using a Real LLM (optional)
+## LLM providers
 
-Edit `.env` and set **either**:
+Edit `.env` and set **one**:
 
 ```bash
 # Anthropic (Claude)
@@ -99,88 +129,132 @@ ANTHROPIC_MODEL=claude-opus-4-7
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
+
+# — or (default) —
+
+LLM_PROVIDER=mock
 ```
 
-Then run `python main.py` again. If the SDK or key is missing, the generator
-automatically falls back to `mock` so your run never fails blind.
+The mock provider produces a real, structured newsletter with stage-appropriate
+content for every pipeline stage (triage, sections, editor, subject, critique).
+Useful for CI, offline dev, and smoke tests.
 
-Add a NewsAPI key for richer ingestion (optional — grab a free key at
-[newsapi.org](https://newsapi.org)):
-
-```bash
-NEWSAPI_KEY=your_key_here
-```
+If the configured SDK or key is missing, the pipeline automatically falls back
+to `mock` so your run never hangs.
 
 ---
 
-## CLI Usage
+## Data sources
 
-```bash
-python main.py                  # full pipeline
-python main.py --dry-run        # fetch + rank only, print top 10 (no LLM call)
-python main.py --limit 20       # cap articles before the LLM call
-python main.py --email          # also deliver via EMAIL_PROVIDER (SMTP/SendGrid)
-python main.py --email --email-to you@example.com  # override recipient
-python main.py --serve          # start the FastAPI dashboard on :8000
-python main.py -v               # verbose / debug logging
-```
+All six can be toggled in `.env`. Defaults are sensible — no keys required.
 
-Output is written to `output/newsletter_<YYYY-MM-DD>.md` and (if
-`EMIT_HTML=true`) `.html`. Ranked article metadata is cached to
-`data/ranked_<YYYY-MM-DD>.json` for debugging/reuse.
+| Source | Key | Default |
+| --- | --- | --- |
+| RSS (8 built-in feeds) | — | on |
+| NewsAPI | `NEWSAPI_KEY` | off if blank |
+| Hacker News | `HN_ENABLED` | on (score ≥ 50) |
+| Reddit | `REDDIT_ENABLED` | on (score ≥ 100, 8 subs) |
+| arXiv | `ARXIV_ENABLED` | on (cs.AI / cs.LG / cs.CL) |
+| GitHub Trending | `GITHUB_TRENDING_ENABLED` | on (all + python + ts) |
 
----
-
-## Email Delivery
-
-Pick a provider in `.env`:
-
-```bash
-EMAIL_PROVIDER=smtp             # or: sendgrid
-EMAIL_FROM=you@example.com
-EMAIL_TO=alice@example.com,bob@example.com
-EMAIL_SUBJECT_PREFIX=Signal Brief
-
-# SMTP (e.g., Gmail with an app password)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=you@example.com
-SMTP_PASSWORD=your-app-password
-SMTP_USE_TLS=true
-
-# — or —
-
-# SendGrid
-SENDGRID_API_KEY=SG.xxxx
-```
-
-Then `python main.py --email` attaches both plain-text and HTML parts.
+Failures in one source never break the others — per-source try/except wraps
+every fetcher.
 
 ---
 
-## Web Dashboard
+## Editorial pipeline
 
-```bash
-python main.py --serve          # or: uvicorn webui:app --port 8000
+```
+   fetch_all
+       │
+       ▼
+ process (dedup + cross-run dedup + rank)
+       │
+       ▼
+ enrich_articles (full-text for top-N)
+       │
+       ▼
+ run_editorial
+   ├─ stage_triage     (LLM picks ~15 of N candidates)
+   ├─ cluster_articles (TF-IDF + cosine)
+   ├─ stage_section    × N clusters (parallel ThreadPool)
+   ├─ stage_editor     (assembles final body)
+   ├─ stage_subject    (≤ 70-char email subject)
+   └─ stage_critique   (0-10 scores; regenerate if < threshold)
+       │
+       ▼
+ write_outputs (Markdown + Jinja2 HTML)
+       │
+       ▼
+ archive.record_issue  +  update_rss_feed  +  deliver(channels)
 ```
 
-Visit `http://127.0.0.1:8000` to:
-
-- Browse past issues with size + modified timestamps
-- View a rendered issue (`/issue/<YYYY-MM-DD>`) or the raw markdown
-- Inspect live config (`/config`) and the ranked data (`/ranked/<YYYY-MM-DD>`)
-- Trigger a fresh pipeline run from the UI (`POST /generate`)
-
-The `/generate` endpoint uses a lock so concurrent triggers don't pile up.
+Each stage flows through the same `LLMClient` interface, so Anthropic /
+OpenAI / mock work identically. The mock client routes by `[stage:*]` marker
+in the system prompt and returns stage-appropriate output for offline runs.
 
 ---
 
-## Scheduling
+## Delivery channels
+
+```bash
+python main.py --deliver email,slack,discord,telegram
+```
+
+Each channel is independent; one failure does not block the others. Required
+env keys:
+
+- **email** — `EMAIL_PROVIDER=smtp|sendgrid` + credentials.
+- **slack** — `SLACK_WEBHOOK_URL` (Incoming Webhook).
+- **discord** — `DISCORD_WEBHOOK_URL` (Server → Integrations → Webhooks).
+- **telegram** — `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`.
+
+Set `DELIVERY_CHANNELS=email,slack` in `.env` to make those the default when
+`--deliver` is not passed.
+
+---
+
+## Docker
+
+```bash
+# One-shot newsletter (runs, delivers, exits):
+docker compose --profile job run --rm newsletter-job
+
+# Long-running dashboard on :8000 with healthcheck:
+docker compose up -d newsletter-web
+```
+
+The image is based on `python:3.12-slim`, runs under a non-root `app` user
+(`uid 10001`), and uses `tini` as PID 1 for clean signal handling. Data and
+output volumes are persisted in `./data` and `./output`.
+
+---
+
+## CI / CD
+
+Two workflows ship in `.github/workflows/`:
+
+- **ci.yml** — runs pytest on Python 3.11 + 3.12, plus a smoke-test import
+  of the editorial pipeline, plus a docker build. Triggers on push / PR.
+- **daily.yml** — scheduled `0 7 * * *` (07:00 UTC). Runs the pipeline with
+  the provider secrets configured in your repo settings and uploads the
+  generated issue as a workflow artifact (30-day retention).
+
+Set these as GitHub **secrets** (encrypted): `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `NEWSAPI_KEY`, `SMTP_USER`, `SMTP_PASSWORD`,
+`SENDGRID_API_KEY`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`,
+`TELEGRAM_BOT_TOKEN`.
+
+Set these as repo **variables** (plaintext): `LLM_PROVIDER`, `EMAIL_PROVIDER`,
+`EMAIL_FROM`, `EMAIL_TO`, `SMTP_HOST`, `SMTP_PORT`, `TELEGRAM_CHAT_ID`,
+`DELIVERY_CHANNELS`.
+
+---
+
+## Scheduling (local, no GitHub)
 
 **Windows (Task Scheduler):**
-
 ```powershell
-# from project root, in PowerShell
 .\scripts\schedule_windows.ps1                  # daily 07:00 local
 .\scripts\schedule_windows.ps1 -Time 09:30      # custom time
 .\scripts\schedule_windows.ps1 -WithEmail       # pass --email
@@ -188,7 +262,6 @@ The `/generate` endpoint uses a lock so concurrent triggers don't pile up.
 ```
 
 **Linux / macOS (cron):**
-
 ```bash
 chmod +x scripts/schedule_cron.sh
 ./scripts/schedule_cron.sh install              # daily at 07:00
@@ -197,89 +270,138 @@ chmod +x scripts/schedule_cron.sh
 ./scripts/schedule_cron.sh remove
 ```
 
-Cron output goes to `output/cron.log` for troubleshooting.
+Cron output goes to `output/cron.log`.
 
 ---
 
-## Project Structure
+## Tests
+
+```bash
+pip install -r requirements.txt
+pytest -v --cov=modules --cov-report=term
+```
+
+The `isolate_fs` fixture in `tests/conftest.py` redirects every test's
+`data/` and `output/` to `tmp_path`, so tests never touch your real archive
+or generated files. `LLM_PROVIDER=mock` is forced for every test run.
+
+---
+
+## Web dashboard
+
+`python main.py --serve` exposes:
+
+| Endpoint | Description |
+| --- | --- |
+| `GET  /` | Dashboard: stats cards, trending pills, issues table, search box |
+| `GET  /search?q=term` | Search past articles by title / summary |
+| `GET  /issue/{date}` | Rendered HTML for a past issue |
+| `GET  /issue/{date}/markdown` | Raw markdown for a past issue |
+| `GET  /issues.json` | Issue metadata as JSON |
+| `GET  /ranked/{date}` | Cached ranked articles for that date |
+| `GET  /config` | Live config (non-secret) |
+| `GET  /rss.xml` | RSS 2.0 feed of recent issues |
+| `GET  /health` | Liveness probe (200 + stats) |
+| `POST /generate` | Trigger a pipeline run (background task, locked) |
+
+Bind to `127.0.0.1` by default — there's **no auth** built in. Put it behind
+an authenticated reverse proxy (Cloudflare Access, Tailscale, etc.) if you
+want remote access.
+
+---
+
+## Project structure
 
 ```
 Ai-News-letter/
-├── main.py                      # CLI entry point (+ --serve, --email)
+├── main.py                      # CLI entry point
 ├── webui.py                     # FastAPI dashboard
 ├── config.py                    # env-driven settings
-├── requirements.txt             # Python dependencies
-├── .env.example                 # configuration template
-├── data/                        # cached ranked articles (gitignored)
-├── output/                      # generated newsletters (gitignored)
+├── requirements.txt
+├── pytest.ini
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── .github/workflows/
+│   ├── ci.yml                   # pytest + docker-build
+│   └── daily.yml                # 07:00 UTC scheduled run
+├── data/                        # cached articles + archive.sqlite3 (gitignored)
+├── output/                      # generated newsletters + rss.xml (gitignored)
 ├── scripts/
-│   ├── schedule_windows.ps1     # Windows Task Scheduler installer
-│   └── schedule_cron.sh         # cron installer
+│   ├── schedule_windows.ps1
+│   └── schedule_cron.sh
+├── templates/
+│   ├── email.html.j2            # newsletter HTML (used by email + /issue)
+│   ├── dashboard.html.j2
+│   └── search.html.j2
+├── tests/                       # pytest suite (isolated fs + mock LLM)
 └── modules/
-    ├── fetch_news.py            # RSS + NewsAPI + HN + Reddit ingestion
-    ├── process_news.py          # canonical-URL dedupe + rank
-    ├── generate_newsletter.py   # LLM generation (Anthropic / OpenAI / mock)
-    ├── email_sender.py          # SMTP + SendGrid delivery
-    └── formatter.py             # Markdown + HTML output
+    ├── fetch_news.py            # RSS + NewsAPI + HN + Reddit
+    ├── sources_extra.py         # arXiv + GitHub Trending
+    ├── process_news.py          # dedup + cross-run dedup + rank
+    ├── enrich.py                # full-text readability extraction
+    ├── cluster.py               # TF-IDF topic clustering
+    ├── editorial.py             # multi-stage LLM pipeline
+    ├── generate_newsletter.py   # LLM clients (Anthropic / OpenAI / mock)
+    ├── archive.py               # SQLite: articles, issues, trending
+    ├── delivery.py              # Slack / Discord / Telegram / RSS router
+    ├── email_sender.py          # SMTP + SendGrid
+    ├── formatter.py             # Markdown + Jinja2 HTML
+    ├── retry.py                 # exponential-backoff decorator
+    └── logging_setup.py         # text + JSON structured logging
 ```
 
-## How it Works
-
-1. **Ingestion** (`modules/fetch_news.py`) — hits NewsAPI (if key set), RSS
-   feeds, Hacker News top stories above `HN_MIN_SCORE`, and each configured
-   subreddit's top-of-day. Normalizes to a common schema.
-2. **Processing** (`modules/process_news.py`) — canonical-URL dedupe (strips
-   `utm_*`/`gclid`/etc.) + title Jaccard near-dupe filter, preferring the
-   highest-quality source when the same story surfaces twice. Then scores:
-   `topical keywords + source quality + length + recency`.
-3. **Generation** (`modules/generate_newsletter.py`) — builds system + user
-   prompts, dispatches to the selected backend. Falls back to `mock` if the
-   configured provider's SDK/key is missing.
-4. **Formatting** (`modules/formatter.py`) — wraps the LLM body with a dated
-   header and an auto-generated sources appendix; writes `.md` and `.html`.
-5. **Delivery** (`modules/email_sender.py`, optional) — multipart email with
-   plain-text + HTML bodies via SMTP or SendGrid.
+---
 
 ## Extending
 
-- **Add an ingestion source**: write `fetch_<name>() -> List[Dict]` in
-  `modules/fetch_news.py` and concatenate inside `fetch_all()`.
-  Each article needs `title`, `summary`, `source`, `url`, `published_at`.
-- **Add a new LLM backend**: implement a class with `generate(system, user)`
-  and register it in `_pick_client()` in `modules/generate_newsletter.py`.
-- **Tune ranking**: edit `KEYWORD_WEIGHTS` / `SOURCE_QUALITY` in
-  `modules/process_news.py`, or replace `score_article()` entirely.
-- **Change the newsletter structure**: edit `SYSTEM_PROMPT` in
-  `modules/generate_newsletter.py`.
+- **New ingestion source**: write `fetch_<name>() -> List[Dict]` in
+  `sources_extra.py` (or `fetch_news.py`) and append it to the tuple in
+  `fetch_all()`. Each article needs `title`, `summary`, `source`, `url`,
+  `published_at`. Wrap the HTTP call with `@with_retry`.
+- **New delivery channel**: add a `send_<name>()` function in
+  `modules/delivery.py` and wire it into `deliver()`'s channel switch.
+- **New LLM backend**: implement a class with `generate(system, user) -> str`
+  and register it in `_pick_client()` in `modules/editorial.py`
+  (and `modules/generate_newsletter.py` for the legacy path).
+- **Change cluster labels**: edit `_THEME_LABELS` in `modules/cluster.py`.
+- **Tune editorial prompts**: each stage has its own `*_SYSTEM` constant
+  at the top of `modules/editorial.py`.
+
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `ModuleNotFoundError: No module named 'requests'` | Virtualenv isn't activated. Re-run the activate step. |
-| `ModuleNotFoundError: fastapi` on `--serve` | Run `pip install -r requirements.txt` — v2 added FastAPI/uvicorn. |
-| `No articles fetched` | You're offline, or a firewall is blocking every source. Try `python main.py -v` to see per-source errors. |
-| `UnicodeEncodeError` on Windows | Run `chcp 65001` first, or use Windows Terminal / PowerShell 7. |
-| LLM call hangs / fails | Set `LLM_PROVIDER=mock` in `.env` to confirm the rest of the pipeline works. |
-| `EMAIL_PROVIDER is not set` | Edit `.env` and set `EMAIL_PROVIDER=smtp` or `sendgrid`, plus the matching credentials. |
-| Reddit 429 / blocked | Reddit occasionally rate-limits raw IPs; set `REDDIT_ENABLED=false` or run less often. |
+| `ModuleNotFoundError` on any module | `pip install -r requirements.txt` |
+| `No articles fetched` | Offline or firewall; try `python main.py -v` |
+| `UnicodeEncodeError` on Windows | `chcp 65001`, or use Windows Terminal |
+| LLM call hangs | Set `LLM_PROVIDER=mock` to isolate to ingestion |
+| Reddit 429 | Backoff is automatic; or set `REDDIT_ENABLED=false` |
+| Archive errors | Delete `data/archive.sqlite3*` to reset |
+| Quality score always low | Your LLM provider may be slower / smaller — try a larger model |
 
-## Requirements
-
-- **Python 3.10+**
-- `requests`, `python-dotenv` (required)
-- `fastapi`, `uvicorn` (required for `--serve`)
-- `anthropic`, `openai` (optional — only needed for those providers)
+---
 
 ## Security
 
-All secrets live in `.env` (loaded by `python-dotenv` via `config.py`). The
-`.env` file is gitignored — **never commit real keys**. `.env.example` is the
-tracked template.
+- Secrets live in `.env` (loaded via `python-dotenv` in `config.py`); `.env`
+  is gitignored. Never commit real keys.
+- The web UI has no authentication — bind to `127.0.0.1` or put it behind an
+  authenticated proxy.
+- The Docker image runs as `uid 10001` and does not expose a shell by default.
+- Telegram message bodies are MarkdownV2-escaped; the Jinja2 environment has
+  autoescape enabled for all `html/xml` templates.
 
-The web dashboard binds to `127.0.0.1` by default and has **no authentication**
-— do not expose it directly to the internet. If you need remote access, put it
-behind an authenticated reverse proxy or SSH-tunnel to it.
+---
+
+## Requirements
+
+- **Python 3.10+** (tested on 3.11 and 3.12 in CI, developed on 3.14).
+- `requests`, `python-dotenv`, `jinja2` (required).
+- `fastapi`, `uvicorn` (required for `--serve`).
+- `anthropic`, `openai` (optional — only for those providers).
 
 ## License
 
